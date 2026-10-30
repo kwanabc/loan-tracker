@@ -815,6 +815,10 @@
       function saveState() {
         try {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          // 通知雲端同步模組：本機資料有變更（同步模組會自動上傳）
+          if (!window.__hermesApplyingRemote && window.HermesSync) {
+            window.HermesSync.markLocalChange();
+          }
         } catch (e) {
           console.warn('LocalStorage save fallback:', e);
         }
@@ -1820,7 +1824,315 @@
           showToast('已清空所有紀錄，您可由零開始輸入');
         });
       });
+
+      // ===== 雲端同步：把本 App 的資料存取能力交給同步模組 =====
+      window.HermesSyncRuntime = {
+        storageKey: STORAGE_KEY,
+        appLabel: '貸款追蹤系統',
+        getState: () => state,
+        setState: (v) => { state = v; },
+        save: saveState,
+        render: renderAll,
+        toast: showToast,
+        validate: (d) => !!d && Array.isArray(d.loans) && Array.isArray(d.allocations) && Array.isArray(d.repayments)
+      };
     })();
+  </script>
+
+  <!-- ================= ☁️ 雲端同步（讓不同電腦共用同一份資料） ================= -->
+  <button id="hsSyncBtn" type="button" title="雲端同步設定"
+    class="fixed bottom-5 left-5 z-40 inline-flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold shadow-lg border border-slate-700 transition">
+    <span id="hsDot" class="w-2 h-2 rounded-full bg-amber-400"></span>
+    <span>☁️ 雲端同步</span>
+  </button>
+
+  <div id="hsSyncModal" class="fixed inset-0 z-[60] hidden items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4 overflow-y-auto">
+    <div class="w-full max-w-lg rounded-2xl bg-white text-slate-900 shadow-2xl border border-slate-200 p-5 space-y-4 my-8">
+      <div class="flex items-start justify-between border-b border-slate-100 pb-3">
+        <div>
+          <h3 class="text-base font-bold">☁️ 雲端同步設定</h3>
+          <p class="text-xs text-slate-500 mt-0.5">把你的資料同步到自己的 GitHub 私人資料庫，不同電腦就能共用同一份</p>
+        </div>
+        <button id="hsCloseBtn" type="button" class="text-slate-400 hover:text-slate-700 px-2 py-1">✕</button>
+      </div>
+
+      <div class="space-y-3 text-sm">
+        <div class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-1">
+          <div class="font-semibold text-slate-900">這是怎麼運作的？</div>
+          <p>你的資料會存到你自己的 GitHub <strong>私人</strong>資料庫（<span class="font-mono">kwanabc/finance-vault</span>，只有你登入 GitHub 才看得到，網站訪客看不到）。</p>
+          <p>在另一台電腦打開同一個網址 → 點左下角這顆 ☁️ → 貼上同一組授權碼 → 資料就會出現。</p>
+          <p class="text-amber-700">資料會離開這台電腦、經加密連線送到 GitHub。若你要求「任何資料都不上傳」，請改用原本的「備份 / 數據管理」手動搬檔。</p>
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold text-slate-700 mb-1">GitHub 授權碼 (token) ＊必填</label>
+          <input id="hsToken" type="password" autocomplete="off" placeholder="github_pat_..........."
+            class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-slate-900" />
+          <p class="text-[11px] text-slate-500 mt-1">貼上一次就好，會存在這台電腦的瀏覽器裡（兩個網站共用同一組）。畫面上不會顯示完整內容。</p>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">資料庫名稱</label>
+            <input id="hsRepo" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono" />
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">檔案名稱</label>
+            <input id="hsPath" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono" />
+          </div>
+        </div>
+
+        <div class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
+          <div class="flex justify-between gap-3"><span class="text-slate-500">狀態</span><span id="hsStatus" class="font-semibold text-slate-800 text-right">尚未設定</span></div>
+          <div class="flex justify-between gap-3"><span class="text-slate-500">最後同步</span><span id="hsLastSync" class="text-slate-700">—</span></div>
+          <div class="flex justify-between gap-3"><span class="text-slate-500">本機最後修改</span><span id="hsDirtyAt" class="text-slate-700">—</span></div>
+          <div class="flex justify-between gap-3"><span class="text-slate-500">雲端版本時間</span><span id="hsRemoteAt" class="text-slate-700">—</span></div>
+          <div class="flex justify-between gap-3"><span class="text-slate-500">這台電腦代號</span><span id="hsDevice" class="text-slate-700">—</span></div>
+          <div id="hsLog" class="pt-1.5 mt-1 border-t border-slate-200 text-[11px] text-slate-500 whitespace-pre-line"></div>
+        </div>
+
+        <div class="flex flex-wrap gap-2">
+          <button id="hsSaveSyncBtn" type="button" class="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition">儲存並立即同步</button>
+          <button id="hsPushBtn" type="button" class="px-3.5 py-2 rounded-xl border border-slate-300 hover:bg-slate-50 text-xs font-semibold transition">上傳本機 → 雲端</button>
+          <button id="hsPullBtn" type="button" class="px-3.5 py-2 rounded-xl border border-slate-300 hover:bg-slate-50 text-xs font-semibold transition">下載雲端 → 本機</button>
+          <button id="hsRestoreBtn" type="button" class="hidden px-3.5 py-2 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-semibold transition">還原同步前的本機版本</button>
+          <button id="hsClearBtn" type="button" class="px-3.5 py-2 rounded-xl border border-rose-200 text-rose-600 hover:bg-rose-50 text-xs font-semibold transition">清除這台電腦的授權碼</button>
+        </div>
+
+        <p class="text-[11px] text-slate-500">提醒：授權碼等於這本資料庫的鑰匙。不要貼給別人、不要放在雲端硬碟。若懷疑外洩，到 GitHub → Settings → Developer settings 把它刪除，再產生一組新的。</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  /* ================= ☁️ Hermes 雲端同步模組 v1（貸款追蹤系統） ================= */
+  (function () {
+    'use strict';
+    const APP_ID = 'loan-tracker';
+    const DEFAULT_REPO = 'kwanabc/finance-vault';
+    const DEFAULT_FILE = 'loan-tracker.json';
+    const CFG_KEY = 'hermes_sync_cfg_v1_' + APP_ID;
+    const TOKEN_KEY = 'hermes_sync_token_v1';
+    const DEV_KEY = 'hermes_sync_device_v1';
+    const BACKUP_KEY = 'hermes_sync_prepull_backup_v1_' + APP_ID;
+
+    let remoteSha = null;
+    let pushTimer = null;
+    let lastFocusSync = 0;
+    let busy = false;
+    let lastMsg = null;
+    let lastTone = null;
+    let hadLocalAtLoad = false;
+
+    const $ = (id) => document.getElementById(id);
+    const rt = () => window.HermesSyncRuntime || null;
+
+    function readJson(k, fb) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : fb; } catch (e) { return fb; } }
+    function cfg() { return readJson(CFG_KEY, {}) || {}; }
+    function setCfg(p) { const c = Object.assign(cfg(), p); try { localStorage.setItem(CFG_KEY, JSON.stringify(c)); } catch (e) {} return c; }
+    function getToken() { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } }
+    function deviceId() {
+      let d = null;
+      try { d = localStorage.getItem(DEV_KEY); } catch (e) {}
+      if (!d) { d = '電腦-' + Math.random().toString(36).slice(2, 6).toUpperCase(); try { localStorage.setItem(DEV_KEY, d); } catch (e) {} }
+      return d;
+    }
+    function fmtTime(ts) { if (!ts) return '—'; const d = new Date(ts); return isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-TW', { hour12: false }); }
+    function toast(msg) { const r = rt(); if (r && typeof r.toast === 'function') { try { r.toast(msg); } catch (e) {} } }
+    function log(msg) {
+      const el = $('hsLog'); if (!el) return;
+      const t = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+      el.textContent = ('• ' + t + ' ' + msg + '\n' + el.textContent).split('\n').slice(0, 5).join('\n');
+    }
+    function setDot(cls) { const d = $('hsDot'); if (d) d.className = 'w-2 h-2 rounded-full ' + cls; }
+    function renderStatus() {
+      const s = $('hsStatus'); if (!s) return;
+      if (lastMsg) { s.textContent = lastMsg; setDot(lastTone || 'bg-slate-400'); return; }
+      if (!getToken()) { s.textContent = '尚未輸入授權碼（不會同步）'; setDot('bg-amber-400'); }
+      else if (!cfg().lastSyncAt) { s.textContent = '已設定，尚未同步過'; setDot('bg-slate-400'); }
+      else { s.textContent = '待命中（有變更會自動上傳）'; setDot('bg-emerald-400'); }
+    }
+    function setStatus(msg, tone) { lastMsg = msg; lastTone = tone || null; renderStatus(); }
+
+    function b64ToUtf8(b) { return new TextDecoder().decode(Uint8Array.from(atob(String(b).replace(/\s/g, '')), (c) => c.charCodeAt(0))); }
+    function utf8ToB64(s) { const bytes = new TextEncoder().encode(s); let bin = ''; bytes.forEach((x) => { bin += String.fromCharCode(x); }); return btoa(bin); }
+
+    function errMsg(code, body) {
+      if (code === 401) return '授權碼無效或已過期（401）。請重新產生一組授權碼貼上。';
+      if (code === 403) return '授權碼權限不足（403）。請確認它有 Contents: Read and write 權限，且可存取這個資料庫。';
+      if (code === 404) return '找不到資料庫或檔案（404）。請確認資料庫名稱，以及授權碼有勾選該資料庫。';
+      if (code === 409 || code === 422) return '雲端檔案版本衝突（' + code + '）。請再按一次同步。';
+      return 'GitHub 回應錯誤（' + code + '）：' + String(body || '').replace(/\s+/g, ' ').slice(0, 160);
+    }
+    function repoName() { return (cfg().repo || DEFAULT_REPO).trim(); }
+    function fileName() { return (cfg().path || DEFAULT_FILE).trim(); }
+
+    async function ghGet() {
+      if (!getToken()) throw new Error('請先輸入 GitHub 授權碼');
+      const url = 'https://api.github.com/repos/' + repoName() + '/contents/' + encodeURIComponent(fileName()) + '?ref=main&ts=' + Date.now();
+      const r = await fetch(url, { headers: { Authorization: 'Bearer ' + getToken(), Accept: 'application/vnd.github+json' }, cache: 'no-store' });
+      if (r.status === 404) return { missing: true };
+      if (!r.ok) throw new Error(errMsg(r.status, await r.text()));
+      const j = await r.json();
+      remoteSha = j.sha;
+      let env = null;
+      try { env = JSON.parse(b64ToUtf8(j.content || '')); } catch (e) { env = null; }
+      return { sha: j.sha, envelope: env };
+    }
+
+    async function ghPut(env) {
+      const body = {
+        message: 'sync(' + APP_ID + '): ' + new Date().toLocaleString('zh-TW', { hour12: false }) + ' @ ' + deviceId(),
+        content: utf8ToB64(JSON.stringify(env, null, 2)),
+        branch: 'main'
+      };
+      if (remoteSha) body.sha = remoteSha;
+      const r = await fetch('https://api.github.com/repos/' + repoName() + '/contents/' + encodeURIComponent(fileName()), {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer ' + getToken(), Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!r.ok) throw new Error(errMsg(r.status, await r.text()));
+      const j = await r.json();
+      remoteSha = j && j.content ? j.content.sha : null;
+      return j;
+    }
+
+    async function doPush(reason) {
+      const r = rt(); if (!r) throw new Error('App 尚未就緒，請重新整理頁面');
+      const env = { app: APP_ID, version: 1, updatedAt: new Date().toISOString(), device: deviceId(), payload: r.getState() };
+      await ghPut(env);
+      setCfg({ lastPushedAt: env.updatedAt, lastSyncAt: new Date().toISOString(), dirtyAt: null, remoteUpdatedAt: env.updatedAt });
+      setStatus('✅ 已上傳到雲端（' + (reason || '手動') + '）', 'bg-emerald-400');
+      log('上傳成功 ' + fmtTime(env.updatedAt));
+    }
+
+    async function applyEnvelope(env, why) {
+      const r = rt(); if (!r) throw new Error('App 尚未就緒，請重新整理頁面');
+      if (!env || !env.payload || (r.validate && !r.validate(env.payload))) throw new Error('雲端檔案格式不符，為安全起見未套用');
+      try { localStorage.setItem(BACKUP_KEY, JSON.stringify({ savedAt: new Date().toISOString(), payload: r.getState() })); } catch (e) {}
+      window.__hermesApplyingRemote = true;
+      try { r.setState(env.payload); r.save(); r.render(); } finally { window.__hermesApplyingRemote = false; }
+      setCfg({ lastPushedAt: env.updatedAt, lastSyncAt: new Date().toISOString(), dirtyAt: null, remoteUpdatedAt: env.updatedAt });
+      setStatus('✅ 已載入雲端資料（' + fmtTime(env.updatedAt) + '，來自 ' + (env.device || '其他電腦') + '）', 'bg-emerald-400');
+      log('下載並套用成功（' + (why || '') + '）');
+      toast('☁️ 已載入雲端最新資料');
+    }
+
+    async function autoSync() {
+      const c = cfg();
+      const res = await ghGet();
+      if (res.missing) { await doPush('首次建立雲端檔案'); return; }
+      const env = res.envelope;
+      if (!env || !env.payload) throw new Error('雲端檔案內容無法解析');
+      const dirtyAt = c.dirtyAt || null;
+      const freshLocal = !hadLocalAtLoad && !dirtyAt;
+      if (dirtyAt && (!env.updatedAt || dirtyAt >= env.updatedAt)) { await doPush('本機較新'); return; }
+      if (freshLocal || env.updatedAt !== c.lastPushedAt) { await applyEnvelope(env, '雲端較新'); return; }
+      setCfg({ lastSyncAt: new Date().toISOString(), remoteUpdatedAt: env.updatedAt });
+      setStatus('✅ 已是最新（兩邊相同）', 'bg-emerald-400');
+    }
+
+    async function syncNow(mode) {
+      if (busy) return;
+      if (!rt()) return;
+      if (!getToken()) { setStatus('尚未輸入授權碼，無法同步', 'bg-amber-400'); return; }
+      busy = true;
+      setStatus('同步中…', 'bg-blue-400');
+      try {
+        if (mode === 'push') { await doPush('手動上傳'); }
+        else if (mode === 'pull') { const res = await ghGet(); if (res.missing) { await doPush('雲端尚無檔案'); } else { await applyEnvelope(res.envelope, '手動下載'); } }
+        else { await autoSync(); }
+      } catch (e) {
+        setStatus('❌ ' + (e && e.message ? e.message : String(e)), 'bg-rose-500');
+        log('錯誤：' + (e && e.message ? e.message : String(e)));
+      } finally {
+        busy = false;
+        refreshModal();
+      }
+    }
+
+    function markLocalChange() {
+      if (window.__hermesApplyingRemote) return;
+      setCfg({ dirtyAt: new Date().toISOString() });
+      if (!getToken()) { renderStatus(); return; }
+      setStatus('本機有變更，準備自動上傳…', 'bg-blue-400');
+      clearTimeout(pushTimer);
+      pushTimer = setTimeout(() => { syncNow('push'); }, 2500);
+    }
+
+    function refreshModal() {
+      const c = cfg();
+      if ($('hsRepo')) $('hsRepo').value = c.repo || DEFAULT_REPO;
+      if ($('hsPath')) $('hsPath').value = c.path || DEFAULT_FILE;
+      const tokEl = $('hsToken');
+      if (tokEl && document.activeElement !== tokEl) tokEl.value = getToken() ? '••••••••••••••••（已儲存）' : '';
+      if ($('hsLastSync')) $('hsLastSync').textContent = fmtTime(c.lastSyncAt);
+      if ($('hsDirtyAt')) $('hsDirtyAt').textContent = fmtTime(c.dirtyAt);
+      if ($('hsRemoteAt')) $('hsRemoteAt').textContent = fmtTime(c.remoteUpdatedAt);
+      if ($('hsDevice')) $('hsDevice').textContent = deviceId();
+      let hasBackup = false;
+      try { hasBackup = !!localStorage.getItem(BACKUP_KEY); } catch (e) {}
+      if ($('hsRestoreBtn')) $('hsRestoreBtn').classList.toggle('hidden', !hasBackup);
+      renderStatus();
+    }
+
+    function openModal() { refreshModal(); const m = $('hsSyncModal'); if (m) { m.classList.remove('hidden'); m.classList.add('flex'); } }
+    function closeModal() { const m = $('hsSyncModal'); if (m) { m.classList.add('hidden'); m.classList.remove('flex'); } }
+
+    function saveSettingsFromForm() {
+      const raw = ($('hsToken') && $('hsToken').value ? $('hsToken').value : '').trim();
+      if (raw && raw.indexOf('••') !== 0) { try { localStorage.setItem(TOKEN_KEY, raw); } catch (e) {} }
+      setCfg({ repo: ($('hsRepo') && $('hsRepo').value ? $('hsRepo').value : DEFAULT_REPO).trim(), path: ($('hsPath') && $('hsPath').value ? $('hsPath').value : DEFAULT_FILE).trim() });
+      remoteSha = null;
+    }
+
+    function bindUI() {
+      if ($('hsSyncBtn')) $('hsSyncBtn').addEventListener('click', openModal);
+      if ($('hsCloseBtn')) $('hsCloseBtn').addEventListener('click', closeModal);
+      if ($('hsSyncModal')) $('hsSyncModal').addEventListener('click', (e) => { if (e.target === $('hsSyncModal')) closeModal(); });
+      if ($('hsToken')) $('hsToken').addEventListener('focus', () => { if ($('hsToken').value.indexOf('••') === 0) $('hsToken').value = ''; });
+      if ($('hsSaveSyncBtn')) $('hsSaveSyncBtn').addEventListener('click', () => { saveSettingsFromForm(); syncNow('auto'); });
+      if ($('hsPushBtn')) $('hsPushBtn').addEventListener('click', () => { saveSettingsFromForm(); syncNow('push'); });
+      if ($('hsPullBtn')) $('hsPullBtn').addEventListener('click', () => { saveSettingsFromForm(); syncNow('pull'); });
+      if ($('hsClearBtn')) $('hsClearBtn').addEventListener('click', () => {
+        try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+        setStatus('已清除這台電腦的授權碼', 'bg-amber-400');
+        log('授權碼已清除');
+        refreshModal();
+      });
+      if ($('hsRestoreBtn')) $('hsRestoreBtn').addEventListener('click', () => {
+        const b = readJson(BACKUP_KEY, null);
+        const r = rt();
+        if (!b || !b.payload || !r) { setStatus('沒有可還原的備份', 'bg-amber-400'); return; }
+        window.__hermesApplyingRemote = true;
+        try { r.setState(b.payload); r.save(); r.render(); } finally { window.__hermesApplyingRemote = false; }
+        setCfg({ dirtyAt: new Date().toISOString() });
+        setStatus('已還原同步前的本機版本（下次同步會上傳它）', 'bg-amber-400');
+        toast('已還原同步前的版本');
+      });
+    }
+
+    // 記錄「這個瀏覽器開頁時是否本來就有資料」（用來判斷是不是新電腦）
+    try { const r0 = rt(); hadLocalAtLoad = !!(r0 && localStorage.getItem(r0.storageKey) !== null); } catch (e) { hadLocalAtLoad = false; }
+
+    window.HermesSync = { markLocalChange: markLocalChange, syncNow: syncNow, open: openModal, push: () => syncNow('push'), pull: () => syncNow('pull') };
+
+    window.addEventListener('DOMContentLoaded', () => {
+      bindUI();
+      refreshModal();
+      if (getToken()) { setTimeout(() => { syncNow('auto'); }, 700); }
+    });
+
+    // 切回這個分頁時，若沒有未上傳的變更，就檢查一次雲端有沒有新資料
+    window.addEventListener('focus', () => {
+      const now = Date.now();
+      if (now - lastFocusSync < 60000) return;
+      lastFocusSync = now;
+      if (!getToken() || cfg().dirtyAt || busy) return;
+      syncNow('auto');
+    });
+  })();
   </script>
 </body>
 </html>
